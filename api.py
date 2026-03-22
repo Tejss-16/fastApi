@@ -1,25 +1,25 @@
-
 # from db import charts_collection
 from datetime import datetime, timezone
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-import logging
+from fastapi.responses import JSONResponse
 
+import logging
+import pandas as pd
+import io
+import json
+from plotly.utils import PlotlyJSONEncoder
+
+from generate_chart import ChartGenerator
+
+# ---------- LOGGER ----------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
-
 logger = logging.getLogger(__name__)
-import pandas as pd
-import io
-import os
-import base64
-import uuid
 
-
-from generate_chart import ChartGenerator
-
+# ---------- APP ----------
 app = FastAPI()
 
 app.add_middleware(
@@ -47,32 +47,52 @@ async def generate_code(
         contents = await file.read()
         logger.info(f"File received: {file.filename}")
 
+        # ---------- LOAD DATA ----------
         if file.filename.endswith(".csv"):
             df = pd.read_csv(io.BytesIO(contents))
             logger.info("CSV file loaded into DataFrame")
+
         elif file.filename.endswith(".xlsx"):
             df = pd.read_excel(io.BytesIO(contents))
             logger.info("Excel file loaded into DataFrame")
+
         else:
             logger.error("Unsupported file format")
-            return {"error": "Unsupported file format"}
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Unsupported file format"}
+            )
 
+        # ---------- GENERATE CHARTS ----------
         chart_generator = ChartGenerator(df)
         logger.info("ChartGenerator initialized")
 
-        generated_code = chart_generator.generate_charts_code(
+        config = chart_generator.generate_chart_config(
             chart_generator.col_dt_list,
             query
         )
-        logger.info("Code generated from LLM")
+        logger.info("Chart config generated from LLM")
 
-        charts_json = chart_generator.execute_generated_code(generated_code)
-        logger.info(f"Charts generated successfully: {len(charts_json)} charts")
+        charts = chart_generator.build_charts_from_config(config)
+        logger.info(f"Charts generated successfully: {len(charts)} charts")
 
-        return {
-            "charts": charts_json
-        }
+        tables = chart_generator.build_tables_from_config(config)
+        logger.info(f"Tables generated successfully: {len(tables)} tables")
+
+        # ---------- FIX SERIALIZATION ----------
+        response_content = json.loads(
+            json.dumps({"charts": charts,
+                        "tables": tables
+                        },
+                        cls=PlotlyJSONEncoder)
+        )
+
+        return JSONResponse(content=response_content)
 
     except Exception as e:
         logger.exception("Error in /generate-code endpoint")
-        return {"error": str(e)}
+
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
